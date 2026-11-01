@@ -2,6 +2,7 @@ import os
 import json
 import time
 import requests
+import re
 from bs4 import BeautifulSoup
 
 # --- تنظیمات ---
@@ -29,30 +30,28 @@ def save_state(last_id):
         json.dump({"last_id": last_id}, f)
 
 def send_to_telegram(text, image_url=None):
-    # ارسال متن و عکس با هم (اگر عکس وجود داشت)
     if image_url:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
         payload = {"chat_id": TG_CHAT_ID, "caption": text[:1024], "parse_mode": "HTML"}
         try:
-            # دانلود عکس در حافظه
             img_data = requests.get(image_url, headers=HEADERS, timeout=30).content
             files = {"photo": ("image.jpg", img_data)}
             r = requests.post(url, data=payload, files=files, timeout=30)
             if r.status_code == 200:
-                print(f"Photo sent: {r.json()['result']['message_id']}")
+                print(f"Photo sent successfully.")
                 return
             else:
                 print(f"Failed to send photo: {r.text}")
         except Exception as e:
             print(f"Error sending photo: {e}")
     
-    # اگر عکسی نبود یا ارسال عکس خطا داد، فقط متن بفرست
+    # Fallback to text message
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": False}
     try:
         r = requests.post(url, json=payload, timeout=30)
         if r.status_code == 200:
-            print(f"Message sent: {r.json()['result']['message_id']}")
+            print(f"Message sent successfully.")
         else:
             print(f"Failed to send message: {r.text}")
     except Exception as e:
@@ -68,35 +67,41 @@ def process_channel():
         return
 
     soup = BeautifulSoup(r.text, "html.parser")
-    posts = soup.find_all("div", class_="etme_widget_message_wrap")
     
-    # اگر کد صفحه تغییر کرده باشد
+    # پیدا کردن پست‌ها با استفاده از data-post
+    posts = soup.find_all(attrs={"data-post": True})
+    print(f"Found {len(posts)} posts on the page.")
+    
     if not posts:
-        print("WARNING: No posts found. Eitaa HTML structure might have changed.")
+        print("WARNING: No posts found.")
         return
 
     last_saved_id = get_last_state()
-    new_last_id = last_saved_id if last_saved_id else 0
+    new_last_id = last_saved_id if last_saved_id is not None else 0
     all_posts = []
 
-    # استخراج اطلاعات پست‌ها
     for post in posts:
         post_id_attr = post.get("data-post")
-        if not post_id_attr:
+        if not post_id_attr: continue
+        try:
+            post_id = int(post_id_attr.split("/")[-1])
+            all_posts.append((post_id, post))
+        except ValueError:
             continue
-        post_id = int(post_id_attr.split("/")[-1])
-        all_posts.append((post_id, post))
 
-    # اگر اولین بار است (State خالی است)، فقط آخرین ID را ذخیره کن و خارج شو
-    if last_saved_id is None:
-        if all_posts:
-            max_id = max(p[0] for p in all_posts)
-            save_state(max_id)
-            print(f"FIRST RUN: Saved max post ID {max_id}. No posts sent.")
+    if not all_posts:
+        print("No valid post IDs found.")
         return
 
-    # مرتب‌سازی پست‌ها از قدیم به جدید
+    # اگر اولین بار است
+    if last_saved_id is None:
+        max_id = max(p[0] for p in all_posts)
+        save_state(max_id)
+        print(f"FIRST RUN: Saved max post ID {max_id}. No posts sent.")
+        return
+
     all_posts.sort(key=lambda x: x[0])
+    print(f"Last saved ID: {last_saved_id}")
 
     for post_id, post in all_posts:
         if post_id <= last_saved_id:
@@ -108,35 +113,31 @@ def process_channel():
         text_div = post.find("div", class_="etme_widget_message_text")
         text = text_div.get_text(separator="\n", strip=True) if text_div else ""
 
-        # بررسی وجود فایل ضمیمه
+        # بررسی فایل ضمیمه
         doc_div = post.find("div", class_="etme_widget_message_document_title")
         if doc_div:
             doc_name = doc_div.get_text(strip=True)
             text += f"\n\n📎 <i>این پست در ایتا دارای فایل ضمیمه ({doc_name}) است که منتقل نشده.</i>"
 
-        # استخراج لینک عکس (اگر وجود دارد)
+        # استخراج عکس
         image_url = None
         photo_div = post.find("a", class_="etme_widget_message_photo_wrap")
         if photo_div and photo_div.get("style"):
-            # استخراج URL از style="background-image:url('...')"
-            import re
             match = re.search(r"url\('(.+?)'\)", photo_div["style"])
             if match:
                 image_url = match.group(1)
 
         if not text and not image_url:
-            print(f"Post {post_id} has no text or image. Skipping.")
+            print(f"Post {post_id} empty, skipping.")
             new_last_id = post_id
             continue
 
-        # ارسال به تلگرام
         if not text:
-            text = "📷 [عکس]" # اگر فقط عکس بود
+            text = "📷 [عکس]"
+        
         send_to_telegram(text, image_url)
         new_last_id = post_id
-        
-        # تاخیر کوچک بین ارسال‌ها برای جلوگیری از مسدودی تلگرام
-        time.sleep(3)
+        time.sleep(2)
 
     if new_last_id > (last_saved_id or 0):
         save_state(new_last_id)
