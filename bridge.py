@@ -45,7 +45,7 @@ def send_to_telegram(text, image_url=None):
         except Exception as e:
             print(f"Error sending photo: {e}")
     
-    # Fallback to text message
+    # اگر عکس نبود یا خطا داد، فقط متن بفرست
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": False}
     try:
@@ -67,15 +67,8 @@ def process_channel():
         return
 
     soup = BeautifulSoup(r.text, "html.parser")
-    
-    # پیدا کردن پست‌ها با استفاده از data-post
     posts = soup.find_all(attrs={"data-post": True})
-    print(f"Found {len(posts)} posts on the page.")
     
-    if not posts:
-        print("WARNING: No posts found.")
-        return
-
     last_saved_id = get_last_state()
     new_last_id = last_saved_id if last_saved_id is not None else 0
     all_posts = []
@@ -93,8 +86,8 @@ def process_channel():
         print("No valid post IDs found.")
         return
 
-    # اگر اولین بار است
-    if last_saved_id is None:
+    # اگر اولین بار است (State صفر است)
+    if last_saved_id is None or last_saved_id == 0:
         max_id = max(p[0] for p in all_posts)
         save_state(max_id)
         print(f"FIRST RUN: Saved max post ID {max_id}. No posts sent.")
@@ -119,13 +112,17 @@ def process_channel():
             doc_name = doc_div.get_text(strip=True)
             text += f"\n\n📎 <i>این پست در ایتا دارای فایل ضمیمه ({doc_name}) است که منتقل نشده.</i>"
 
-        # استخراج عکس
+        # استخراج عکس (با اصلاح لینک نسبی)
         image_url = None
         photo_div = post.find("a", class_="etme_widget_message_photo_wrap")
         if photo_div and photo_div.get("style"):
             match = re.search(r"url\('(.+?)'\)", photo_div["style"])
             if match:
-                image_url = match.group(1)
+                raw_url = match.group(1)
+                if raw_url.startswith("/"):
+                    image_url = "https://eitaa.com" + raw_url
+                else:
+                    image_url = raw_url
 
         if not text and not image_url:
             print(f"Post {post_id} empty, skipping.")
@@ -137,7 +134,7 @@ def process_channel():
         
         send_to_telegram(text, image_url)
         new_last_id = post_id
-        time.sleep(2)
+        time.sleep(2) # تاخیر برای جلوگیری از مسدودی
 
     if new_last_id > (last_saved_id or 0):
         save_state(new_last_id)
